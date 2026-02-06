@@ -1,5 +1,7 @@
 """Benchmarks gemm + all_reduce for DP gradient sync simulation."""
 
+import time
+
 import os
 from typing import Any, Dict, Optional, Callable
 
@@ -72,9 +74,6 @@ def setup_tpu_env():
         "--xla_tpu_use_tc_device_shape_on_sc=true "
     )
 
-    print("Step 1: Calling jax.distributed.initialize(initialization_timeout=300)...", flush=True)
-    jax.distributed.initialize(initialization_timeout=300)
-    print("Step 1: jax.distributed.initialize() completed.", flush=True)
     _INITIALIZED = True
 
 
@@ -107,11 +106,19 @@ def _run_gemm_base(
             return out
 
     print("Step 2: Creating Mesh and Shardings...", flush=True)
+    start_mesh = time.time()
     mesh = create_mesh(sharding_strategy)
     lhs_sharding = get_lhs_named_shading(mesh, sharding_strategy)
     rhs_sharding = get_rhs_named_shading(mesh, sharding_strategy)
     out_sharding = get_out_sharding(sharding_strategy)
+    end_mesh = time.time()
+    print(f"Step 2: Mesh Creation Completed. Time taken: {end_mesh - start_mesh:.4f} seconds", flush=True)
 
+    lhs_shape = (m, k)
+    rhs_shape = (k, n)
+
+    print("Step 2b: JIT Compiling...", flush=True)
+    start_compile = time.time()
     jit_sharded_f = jax.jit(
         shard_map(
             f,
@@ -124,29 +131,37 @@ def _run_gemm_base(
             check_rep=False,
         )
     )
+    # Force compilation
+    lower_f = jit_sharded_f.lower(
+        jax.ShapeDtypeStruct(lhs_shape, dtype),
+        jax.ShapeDtypeStruct(rhs_shape, dtype)
+    )
+    compiled_f = lower_f.compile()
+    end_compile = time.time()
+    print(f"Step 2b: JIT Compilation Completed. Time taken: {end_compile - start_compile:.4f} seconds", flush=True)
 
-    lhs_shape = (m, k)
-    rhs_shape = (k, n)
     lhs_dtype = dtype
     rhs_dtype = dtype
     key = jax.random.key(SEED)
 
+    print("Step 3: Generating Data (Once)...", flush=True)
+    # Create random data on host and put on device ONCE
+    key, key_lhs, key_rhs = jax.random.split(key, 3)
+    lhs_host = jax.random.normal(key_lhs, lhs_shape).astype(lhs_dtype)
+    rhs_host = jax.random.normal(key_rhs, rhs_shape).astype(rhs_dtype)
+    lhs_device = jax.device_put(lhs_host, lhs_sharding)
+    rhs_device = jax.device_put(rhs_host, rhs_sharding)
+    print("Step 3: Data Generation Completed.", flush=True)
+
     def data_generator():
-        """Creates new random data on host and puts it on device."""
-        nonlocal key
-        key, key_lhs, key_rhs = jax.random.split(key, 3)
-
-        # Create random data on host
-        lhs_host = jax.random.normal(key_lhs, lhs_shape).astype(lhs_dtype)
-        rhs_host = jax.random.normal(key_rhs, rhs_shape).astype(rhs_dtype)
-
-        # Put on device (HBM)
-        lhs_device = jax.device_put(lhs_host, lhs_sharding)
-        rhs_device = jax.device_put(rhs_host, rhs_sharding)
-
+        """Returns pre-allocated device data with simple mutation to avoid caching."""
+        nonlocal lhs_device
+        # Simple cheap mutation on device to ensure we read fresh memory/cache lines
+        lhs_device = -lhs_device 
         return (lhs_device, rhs_device)
 
-    print("Step 3: Starting Execution Loop (includes JIT)...", flush=True)
+    print("Step 4: Starting Execution Loop (includes JIT)...", flush=True)
+    start_exec = time.time()
     time_ms_list = multiple_iteration_timeit_from_trace(
         jit_sharded_f,
         data_generator,
@@ -156,7 +171,9 @@ def _run_gemm_base(
         trace_dir=trace_dir,
         multi_op=True,
     )
+    end_exec = time.time()
     print("Step 4: Execution Loop Completed.", flush=True)
+    print(f"Step 4: Total Execution Loop Time: {end_exec - start_exec:.4f} seconds", flush=True)
     
     return {
         "time_ms_list": time_ms_list,
@@ -174,12 +191,9 @@ def gemm_all_reduce(
     """Benchmarks the Matmul(A, B) + AllReduce(C)."""
     return _run_gemm_base(
         m, k, n, dtype, num_runs, trace_dir,
-        sharding_strategy=ShardingStrategy.NO_SHARDING,
+        sharding_strategy=ShardingStrategy.SHARDING_ON_ALL_DEVICES_WITH_K,
         task_name_suffix="gemm_all_reduce"
     )
-
-
-
 
 
 def _calculate_metrics_base(
@@ -217,11 +231,8 @@ def gemm_all_reduce_calculate_metrics(
     # We use Size * 2 as a proxy for total bytes moved (assuming large N).
 
     metadata, metrics = _calculate_metrics_base(
-        m, k, n, dtype, time_ms_list, ShardingStrategy.NO_SHARDING
+        m, k, n, dtype, time_ms_list, ShardingStrategy.SHARDING_ON_ALL_DEVICES_WITH_K
     )
     
     metadata["type"] = "gemm_all_reduce"
     return metadata, metrics
-
-
-

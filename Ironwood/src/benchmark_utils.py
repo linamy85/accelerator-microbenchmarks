@@ -60,7 +60,7 @@ class ShardingStrategy(Enum):
   )  # Only sharding on the two core of one single chip
   SHARDING_ON_ALL_DEVICES_WITH_N = auto()
   SHARDING_ON_SINGLE_CHIP_WITH_N = auto()
-
+  SHARDING_ON_ALL_DEVICES_WITH_K = auto()
 
 
 def multiple_iteration_timeit_from_trace_throttling(
@@ -1013,7 +1013,8 @@ def get_rhs_named_shading(mesh, strategy: ShardingStrategy):
             return NamedSharding(mesh, P(None, "device"))
         case ShardingStrategy.SHARDING_ON_SINGLE_CHIP_WITH_N:
             return NamedSharding(mesh, P(None, "device"))
-
+        case ShardingStrategy.SHARDING_ON_ALL_DEVICES_WITH_K:
+            return NamedSharding(mesh, P("device", None))
 
 
 def get_out_sharding(strategy: ShardingStrategy):
@@ -1028,7 +1029,8 @@ def get_out_sharding(strategy: ShardingStrategy):
             return P(None, "device")
         case ShardingStrategy.SHARDING_ON_SINGLE_CHIP_WITH_N:
             return P(None, "device")
-
+        case ShardingStrategy.SHARDING_ON_ALL_DEVICES_WITH_K:
+             return P(None, None)
 
 
 def get_rowwise_named_shading(mesh, strategy: ShardingStrategy):
@@ -1071,7 +1073,8 @@ def handle_per_device_based_on_sharding(value, strategy: ShardingStrategy):
             return value // jax.device_count()
         case ShardingStrategy.SHARDING_ON_SINGLE_CHIP_WITH_N:
             return value // 2
-
+        case ShardingStrategy.SHARDING_ON_ALL_DEVICES_WITH_K:
+            return value // jax.device_count()
 
 
 def handle_all_devices_based_on_sharding(value: int, strategy: ShardingStrategy):
@@ -1086,7 +1089,8 @@ def handle_all_devices_based_on_sharding(value: int, strategy: ShardingStrategy)
             return value
         case ShardingStrategy.SHARDING_ON_SINGLE_CHIP_WITH_N:
             return value * jax.device_count() // 2
-
+        case ShardingStrategy.SHARDING_ON_ALL_DEVICES_WITH_K:
+            return value
 
 
 def handle_based_on_sharding(value: int, strategy: ShardingStrategy):
